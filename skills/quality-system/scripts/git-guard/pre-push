@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# pre-push: himoyalangan branch (standart main, master) ga push taqiqlangan (unga faqat GitHub da gh pr merge orqali), qolgan branchlarda faqat fast-forward.
+# Yoqish: git config core.hooksPath .githooks (submodule da ../../.githooks); python3 .claude/quality/main_guard.py --setup hammasini o'zi qiladi.
+# Himoyalangan branchlar: git config quality.protected (har qiymat bitta yoki vergul bilan bir nechta branch); o'rnatilmagan bo'lsa main va master.
+# Kirish (stdin): <local ref> <local sha> <remote ref> <remote sha>; barcha qatorlar ko'riladi, oxirida umumiy holat bilan chiqiladi.
+status=0
+fail() { echo "push rad etildi: $1 (loyiha CLAUDE.md dagi merge qoidasi)" >&2; status=1; }
+
+protected=$(git config --get-all quality.protected 2>/dev/null | tr ', ' '\n\n')
+[ -n "$(echo "$protected" | tr -d '[:space:]')" ] || protected=$'main\nmaster'
+
+is_protected() {  # $1 = masofadagi ref
+  local ref="$1" p
+  case "$ref" in refs/heads/*) ;; *) return 1 ;; esac
+  while IFS= read -r p; do
+    [ -n "$p" ] && [ "refs/heads/$p" = "$ref" ] && return 0
+  done <<< "$protected"
+  return 1
+}
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if is_protected "$remote_ref"; then
+    fail "$remote_ref ga to'g'ridan-to'g'ri push taqiqlangan, PR oching va gh pr merge ishlating"
+    continue
+  fi
+  # branch o'chirish yoki yangi ref: solishtirish kerak emas
+  [[ "$local_sha" =~ ^0+$ ]] && continue
+  [[ "$remote_sha" =~ ^0+$ ]] && continue
+  if ! git cat-file -e "${remote_sha}^{commit}" 2>/dev/null; then
+    fail "$remote_ref: masofadagi commit ($remote_sha) lokal repoda yo'q, avval git fetch qiling"
+    continue
+  fi
+  if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    fail "$remote_ref: fast-forward emas (force push), git fetch qilib rebase yoki merge qiling"
+  fi
+done
+exit "$status"
