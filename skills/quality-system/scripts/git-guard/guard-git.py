@@ -21,6 +21,7 @@ CONFIG_REL = os.path.join(".claude", "quality", "config.json")
 STAMP_CORE = r"(?:[A-Za-z0-9_]+-)?(?:ci|review)-ok(?![A-Za-z0-9_])"
 STAMP = re.compile(STAMP_CORE)
 STAMP_MSG = "tekshiruv izini (<prefiks>-ci-ok, <prefiks>-review-ok) qo'lda yozib bo'lmaydi"
+ALIAS_MSG = "git alias ichiga push yoki shell buyrug'ini yashirib bo'lmaydi"
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 STAMP_SUBST_TARGET = re.compile(r">\|?\s*\S*(?:\$\(|`)[^)`\n]*" + STAMP_CORE)
 HOOKS_ENV = re.compile(r"GIT_CONFIG\w*=\S*(?:hookspath|quality\.protected)", re.I)
@@ -28,11 +29,25 @@ MAX_DEPTH = 8
 
 # faqat o'qiydigan buyruqlar: argumentida iz nomi bo'lsa ham bloklanmaydi (echo/printf/gh: PR matni; yozish baribir > yoki tee orqali ushlanadi)
 READ_ONLY = {"cat", "head", "tail", "less", "ls", "stat", "test", "[", "wc", "grep", "rg", "diff", "cut", "file", "git",
-             "echo", "printf", "gh"}
+             "echo", "printf", "gh", "egrep", "fgrep", "man", ":", "ag", "ack", "[[", "basename", "dirname", "export"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
+# bulardan keyin buyruq boshlanadi: `then git push`, `do git push`, `{ git push`, `! git push`
+SHELL_KEYWORDS = {"if", "then", "elif", "else", "while", "until", "do", "!", "{"}
+# so'zlari buyruq emas, ro'yxat: `for t in git push; do ...`
+WORD_LISTS = {"for", "select"}
+# noma'lum o'ramning (xargs, find -exec, caffeinate, ...) argumentlari ichida boshlanadigan buyruqlar
+NESTED = SHELLS | {"git", "gh", "eval"}
+FIND_EXEC = {"-exec", "-execdir", "-ok", "-okdir"}
+# noma'lum o'ram skaneri: bu buyruqdan keyingi argumentlar qidiruv yoki chiqish matni (xargs grep 'git push ...')
+SEARCH_TOOLS = {"grep", "rg", "egrep", "fgrep", "ag", "ack", "echo", "printf"}
+# argumenti matn ifodasi yoki fayl nomi, buyruq emas (sed 's|; git push -f||')
+NO_SCAN = {"tee", "sed", "awk", "gawk", "perl"}
+ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+HEREDOC_KEY = re.compile(r"^__heredoc_(\d+)__$")
+SHELL_CHAIN = re.compile(r"[;&|\n]\s*(?:[A-Za-z_]\w*=\S*\s+|(?:command|env|sudo)\s+)*(?:\S*/)?(?:git|gh)\s")  # tirnoq ichida: 'cd x && git push -f'
 # buyruqni o'rab oluvchilar: (qiymat oladigan optsiyalar, o'tkazib yuboriladigan pozitsion argumentlar soni)
 WRAPPERS = {
-    "env": ("-u -C -S", 0), "command": ("", 0), "nohup": ("", 0), "time": ("-f -o", 0), "sudo": ("-u -g -h -p -C -D -R -T -U", 0),
+    "env": ("-u -C", 0), "command": ("", 0), "nohup": ("", 0), "time": ("-f -o", 0), "sudo": ("-u -g -h -p -C -D -R -T -U", 0),
     "exec": ("-a", 0), "builtin": ("", 0), "nice": ("-n", 0), "timeout": ("-s -k", 1),
 }
 # git uzun optsiyalarning qisqartmasini ham qabul qiladi (--no-ver), shuning uchun prefiks bo'yicha tekshiriladi
@@ -89,12 +104,12 @@ def read_protected(roots):
     return DEFAULT_PROTECTED
 
 
-def strip_heredocs(cmd):
-    """Heredoc tanasini tashlaydi (PR matnidagi `git push origin main` buyruq emas). Tugatuvchi qator topilmasa tegmaydi."""
+def strip_heredocs(cmd, bodies):
+    """Heredoc tanasini tashlaydi (PR matnidagi `git push origin main` buyruq emas). Tugatuvchi qator topilmasa tegmaydi.
+    Tana bodies ga (matn, tirnoqsizmi) bo'lib tushadi, `<<` yonidagi so'z __heredoc_N__ ga almashadi: tana o'z buyrug'iga shu raqam bilan boradi."""
     lines, out, i = cmd.split("\n"), [], 0
     while i < len(lines):
-        line = lines[i]
-        out.append(line)
+        line, kept, last = lines[i], [], 0
         i += 1
         for m in HEREDOC.finditer(line):
             word = m.group(2) or m.group(3) or m.group(4)
@@ -103,8 +118,43 @@ def strip_heredocs(cmd):
                 j += 1
             if j >= len(lines):
                 break
+            kept.append(f"{line[last:m.start()]}<<__heredoc_{len(bodies)}__")
+            last = m.end()
+            bodies.append(("\n".join(lines[i:j]), bool(m.group(4)) and "\\" not in m.group(0)))
             i = j + 1
+        out.append("".join(kept) + line[last:])
     return "\n".join(out)
+
+
+def dollar_quotes(s):
+    """Tirnoqdan tashqaridagi $'a\\nb' ni haqiqiy yangi qatorli 'a<qator>b' ga, $"a" ni "a" ga aylantiradi (shlex ularni bilmaydi; "a\\$" va 'a$' ga tegmaydi)."""
+    out, i, n, q = [], 0, len(s), None
+    while i < n:
+        c = s[i]
+        if q is None and c == "$" and s[i + 1:i + 2] == "'":
+            m = ANSI_C.match(s, i)
+            if m:
+                out.append("'" + m.group(1).replace("\\n", "\n").replace("\\t", "\t").replace("\\'", "'\\''") + "'")
+                i = m.end()
+                continue
+        if q is None and c == "$" and s[i + 1:i + 2] == '"':
+            i += 1
+            continue
+        if q == "'":
+            if c == "'":
+                q = None
+        elif c == "\\" and i + 1 < n:
+            out.append(c)
+            i += 1
+            c = s[i]
+        elif q == '"':
+            if c == '"':
+                q = None
+        elif c in "'\"":
+            q = c
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def strip_comments(s):
@@ -133,8 +183,9 @@ def strip_comments(s):
     return "".join(out)
 
 
-def substitutions(s):
-    """Bajariladigan $(...) va `...` ichki satrlari; bitta tirnoq ichidagilar (masalan markdown `kod`) bajarilmaydi."""
+def substitutions(s, quotes=True):
+    """Bajariladigan $(...) va `...` ichki satrlari; bitta tirnoq ichidagilar (masalan markdown `kod`) bajarilmaydi.
+    quotes=False: heredoc tanasi, u yerda tirnoq oddiy belgi."""
     out = []
 
     def walk(i, nested, sink):
@@ -159,7 +210,7 @@ def substitutions(s):
             elif q == '"':
                 if c == '"':
                     q = None
-            elif c in "'\"":
+            elif quotes and c in "'\"":
                 q = c
             elif nested and c == "(":
                 depth += 1
@@ -184,11 +235,11 @@ def lex(s):
 
 
 def strip_prefix(argv):
-    """VAR=val, env/sudo/time/... o'ramlarini olib tashlab, haqiqiy buyruqni qaytaradi."""
+    """VAR=val, shell kalit so'zlari, env/sudo/time/... o'ramlarini olib tashlab, haqiqiy buyruqni qaytaradi."""
     i = 0
     while i < len(argv):
         a = argv[i]
-        if ASSIGN.match(a):
+        if ASSIGN.match(a) or a in SHELL_KEYWORDS:
             i += 1
             continue
         w = WRAPPERS.get(os.path.basename(a))
@@ -205,14 +256,50 @@ def strip_prefix(argv):
     return argv[i:]
 
 
+def shell_args(args):
+    """Shell argumentlari: (-c matni yoki None, stdin skript sifatida bajariladimi; -n bajarmaydi, skript fayli stdin ni o'qimaydi)."""
+    inline, forced, runs, i = False, False, True, 0
+    while i < len(args) and args[i].startswith(("-", "+")) and args[i] not in ("-", "--"):
+        a = args[i]
+        i += 1
+        if a.startswith("--"):
+            if a in ("--rcfile", "--init-file"):
+                i += 1
+            inline = inline or a == "--command"  # fish
+            continue
+        inline = inline or "c" in a
+        forced = forced or "s" in a
+        runs = runs and "n" not in a
+        if "o" in a or "O" in a:  # -o pipefail, -euo pipefail, -O extglob: qiymat skript emas
+            i += 1
+    if args[i:i + 1] == ["--"]:
+        i += 1
+    rest = args[i:]
+    if inline:
+        return (rest[0] if rest else None), False
+    return None, runs and (forced or not rest or rest[0] in ("-", "/dev/stdin", "/dev/fd/0"))
+
+
+def names_command(word):
+    """git, /usr/bin/git: bajariladigan nom; tools/bash yoki s/git, /git (sed ifodasi) emas."""
+    return word in NESTED or (word.startswith("/") and word.count("/") >= 2 and os.path.basename(word) in NESTED)
+
+
 def read_only(name, args):
     if name == "sed":
         return not any(a.startswith("--in-place") or (a.startswith("-") and not a.startswith("--") and "i" in a) for a in args)
     return name in READ_ONLY
 
 
+def hides_command(alias_value):
+    return alias_value.split()[:1] == ["push"] or alias_value.startswith("!")
+
+
 def hooks_key(key):
-    name = key.split("=", 1)[0].strip().lower()
+    name, _, value = key.partition("=")
+    name = name.strip().lower()
+    if name.startswith("alias.") and hides_command(value):
+        block(ALIAS_MSG)
     if name == "core.hookspath":
         block("`-c core.hooksPath` git hook larni o'chiradi")
     if name == "quality.protected":
@@ -235,10 +322,12 @@ class Guard:
         self.depth = depth
         self.cache = {} if cache is None else cache
         self.vbranch = {}  # repo ildizi -> shu buyruq ichidagi checkout/switch dan keyingi branch (None = detached)
+        self.heredocs = []  # butun buyruqdagi heredoc tanalari (matn, tirnoqsizmi); __heredoc_N__ shu ro'yxatga ishora qiladi
 
     def fork(self):
         g = Guard(self.cwd, self.cache, self.depth + 1)
         g.vbranch = dict(self.vbranch)
+        g.heredocs = self.heredocs
         return g
 
     # --- repo holati -------------------------------------------------------------------------------------------
@@ -272,11 +361,17 @@ class Guard:
     def run(self, cmd):
         if self.depth > MAX_DEPTH:
             block("buyruq juda chuqur ichma-ich (bash -c / eval / $())")
-        cmd = strip_comments(strip_heredocs(cmd)).replace("\\\n", "")
+        start = len(self.heredocs)
+        cmd = dollar_quotes(strip_comments(strip_heredocs(cmd, self.heredocs)).replace("\\\n", ""))
         if STAMP_SUBST_TARGET.search(cmd):  # > $(git rev-parse --git-path x-ci-ok): shlex da nishon faqat `$` bo'lib qoladi
             block(STAMP_MSG)
-        for inner in substitutions(cmd):
+        inners = substitutions(cmd)
+        for inner in inners + [s for body, expands in self.heredocs[start:] if expands for s in substitutions(body, quotes=False)]:
             self.fork().run(inner)
+        for inner in inners:  # bitta so'z bo'lib qoladi: `git push $(x) --no-verify` da shlex qavslarda buyruqni bo'lmasin
+            stamp = STAMP.search(inner)
+            word = stamp.group(0) if stamp and "rev-parse" in inner else "$SUBST"  # rm $(git rev-parse --git-path x-ci-ok)
+            cmd = cmd.replace("$(" + inner + ")", word).replace("`" + inner + "`", word)
         try:
             tokens = lex(cmd)
         except ValueError:
@@ -285,7 +380,7 @@ class Guard:
         self.walk(tokens)
 
     def walk(self, tokens):
-        argv, redirs, pending, stack = [], [], None, []
+        argv, redirs, pending, stack, piped, out = [], [], None, [], [], []
         for tok in tokens:
             if not OP_ONLY.match(tok):
                 if pending:
@@ -300,25 +395,41 @@ class Guard:
                         argv.pop()  # fd prefiksi: 2>file
                     pending = p
                     continue
-                if argv or redirs:
-                    self.simple(argv, redirs)
+                if argv == ["}"]:  # `{ echo x; } | bash`: quvurga oldingi buyruqning chiqishi ketadi
+                    argv = []
+                ran = argv or redirs
+                if ran:
+                    out = self.simple(argv, redirs, piped)
+                if p in ("|", "|&"):
+                    piped = out
+                elif ran:
+                    piped = []
                 argv, redirs, pending = [], [], None
                 if p == "(":
                     stack.append(self.cwd)
                 elif p == ")" and stack:
                     self.cwd = stack.pop()
         if argv or redirs:
-            self.simple(argv, redirs)
+            self.simple(argv, redirs, piped)
 
-    def simple(self, argv, redirs):
+    def simple(self, argv, redirs, piped=()):
+        """Bitta buyruqni tekshiradi; qaytaradi: stdout iga chiqishi ma'lum matnlar (keyingi quvur buyrug'ining stdin i)."""
+        texts = list(piped)
         for op, target in redirs:
             if ">" in op and STAMP.search(target):
                 block(STAMP_MSG)
+            key = HEREDOC_KEY.match(target) if op == "<<" else None
+            if op == "<<<":
+                texts.append(target)
+            elif key and int(key.group(1)) < len(self.heredocs):
+                texts.append(self.heredocs[int(key.group(1))][0])
         if any(HOOKS_ENV.search(w) for w in argv):
             block("GIT_CONFIG_* orqali core.hooksPath ni o'zgartirib bo'lmaydi")
         cmd = strip_prefix(argv)
+        if cmd and " " in cmd[0]:  # env -S 'git push ...'
+            cmd = cmd[0].split() + cmd[1:]
         if not cmd:
-            return
+            return []
         name, args = os.path.basename(cmd[0]), cmd[1:]
         if name in ("cd", "pushd"):
             self.cd(args)
@@ -326,17 +437,32 @@ class Guard:
             self.git(args)
         elif name == "gh":
             self.gh(args)
-        elif name in SHELLS:
-            for i, a in enumerate(args):
-                if a == "--":
-                    break
-                if a.startswith("-") and not a.startswith("--") and "c" in a[1:] and i + 1 < len(args):
-                    self.fork().run(args[i + 1])
-                    break
+        elif name in SHELLS or name in ("source", "."):
+            inline, reads_stdin = shell_args(args)
+            if inline is not None:
+                self.fork().run(inline)
+            if reads_stdin:
+                for text in texts:
+                    self.fork().run(text)
         elif name == "eval":
             self.fork().run(" ".join(args))
+        elif name in WORD_LISTS:
+            if "do" in args:  # `for i do git push` da `;` yo'q
+                self.simple(args[args.index("do") + 1:], [], texts)
+        elif name not in NO_SCAN and not read_only(name, args):
+            start = next((k for k, a in enumerate(args) if a in FIND_EXEC), len(args)) if name == "find" else 0
+            for k, a in enumerate(args[start:], start):
+                if names_command(a):
+                    self.simple(args[k:], [], texts)
+                elif os.path.basename(a) in SEARCH_TOOLS:
+                    break
+                elif " " in a.strip() and (names_command(a.split()[0]) or SHELL_CHAIN.search(a)):  # watch 'git push', flock x -c 'git push'
+                    self.fork().run(a)
         if any(STAMP.search(a) for a in args) and not read_only(name, args):
             block("tekshiruv izini (<prefiks>-ci-ok, <prefiks>-review-ok) qo'lda yozib yoki o'zgartirib bo'lmaydi")
+        if name in ("echo", "printf"):
+            return [" ".join(args).replace("\\n", "\n").replace("\\t", "\t")]  # shlex uchun \n oddiy n harfi bo'lardi va buyruqlar qo'shilib ketardi
+        return texts if name == "tee" or (name == "cat" and args in ([], ["-"])) else []
 
     def cd(self, args):
         rest = [a for a in args if a not in ("-P", "-L", "-e", "-@", "--")]
@@ -389,6 +515,22 @@ class Guard:
             self.config(rest)
         elif sub in ("checkout", "switch"):
             self.switch(sub, rest, d, extra)
+        elif sub in ("send-pack", "http-push"):
+            block(f"`git {sub}` pre-push hook ni ishga tushirmaydi")
+        elif sub == "submodule" and "foreach" in rest:  # bu uchtasi argumentini shell da bajaradi
+            self.nested(rest[rest.index("foreach") + 1:])
+        elif sub == "bisect" and rest[:1] == ["run"]:
+            self.nested(rest[1:])
+        elif sub == "rebase":
+            for k, a in enumerate(rest):
+                if a in ("-x", "--exec") and k + 1 < len(rest):
+                    self.fork().run(rest[k + 1])
+                elif a.startswith("--exec="):
+                    self.fork().run(a.split("=", 1)[1])
+
+    def nested(self, words):
+        """git bajaradigan buyruq: yagona argument shell matni (`foreach 'a && b'`), bir nechtasi argv."""
+        self.fork().run(words[0] if len(words) == 1 else shlex.join(words))
 
     def push(self, rest, d, extra):
         remote, specs, tags, done, i = None, [], False, False, 0
@@ -479,14 +621,19 @@ class Guard:
                 flags.append(a)
             else:
                 pos.append(a)
-        mode = pos.pop(0) if pos and pos[0] in ("get", "set", "unset", "list", "edit") else None  # git 2.46+ sintaksisi
+        mode = pos.pop(0) if pos and pos[0] in ("get", "set", "unset", "list", "edit", "remove-section", "rename-section") else None  # git 2.46+ sintaksisi
+        reading = mode in ("get", "list") or any(f.startswith("--get") or f in ("--list", "-l") for f in flags)
+        if (mode in ("remove-section", "rename-section") or any(f in ("--remove-section", "--rename-section") for f in flags)) and any(p.lower() in ("core", "quality") for p in pos):
+            block("core va quality bo'limlarini o'chirib yoki qayta nomlab bo'lmaydi")
+        for k, p in enumerate(pos[:-1]):
+            if not reading and p.lower().startswith("alias.") and hides_command(pos[k + 1]):
+                block(ALIAS_MSG)
         keys = [k for k, p in enumerate(pos) if p.lower() in GUARDED_KEYS]
         if not keys:
             return
         key = pos[keys[0]].lower()
         if mode == "unset" or any(f.startswith("--unset") or f == "--remove-section" for f in flags):
             block(f"{pos[keys[0]]} ni o'chirib bo'lmaydi")
-        reading = mode in ("get", "list") or any(f.startswith("--get") or f in ("--list", "-l") for f in flags)
         k = keys[0]
         if reading or k + 1 >= len(pos):
             return
