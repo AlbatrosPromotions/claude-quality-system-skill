@@ -61,8 +61,8 @@ Per module: purpose (2 lines), entry points (routes, commands, listeners), invar
 ## 11. Git guard (proven, installable)
 
 `scripts/git-guard/` in this skill (`README.md` there). Three layers because each alone has a hole:
-- PreToolUse hook reads the command text (catches intent early, explains the rule to the agent; misses git hidden inside `python -c`, `xargs`, scripts).
-- git `pre-push` sees every push however invoked (misses `--no-verify`, which layer 1 blocks, and unset `core.hooksPath`, which layer 3 detects).
+- PreToolUse hook reads the command text (catches intent early, explains the rule to the agent; misses git hidden inside `python -c`, scripts and values known only at run time: variables, `$(...)` output, `xargs` stdin).
+- git `pre-push` sees every `git push` however invoked (`git send-pack` skips it, so layer 1 blocks that; misses `--no-verify`, which layer 1 blocks when it can read it, and unset `core.hooksPath`, which layer 3 detects). A `--no-verify` that layer 1 cannot read defeats both, so only layer 3 sees that push, after it has landed.
 - History check: first-parent history of main after a baseline must be only "Merge pull request #N from" commits; also verifies `core.hooksPath` in the repo and submodules. Runs in the gate and at session start (`--fetch --warn-only`).
 Server-side protection (paid GitHub plan or a public repo) is the only full lock; say so.
 
