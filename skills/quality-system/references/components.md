@@ -1,23 +1,24 @@
 # Components: how to build each part
 
-Numbers match the table in SKILL.md. "Proven" parts have working code in sos-scrum (`/Users/olimjon/Projects/sos-scrum`) to copy from.
+Numbers match the table in SKILL.md. Proven parts ship as installable kits under `scripts/` (git-guard, review-gate); "designed" parts are recipes.
 
-## §0 Local gate when hosted CI is unavailable (proven)
+## §0 Local gate when hosted CI is unavailable (proven, installable)
 
-Pattern from sos-scrum (`infra/ci/local-ci.sh`, `.claude/hooks/require-local-ci.sh`):
-- One script runs every check in parallel lanes, prints a stage timing table and a budget (e.g. 600 s).
-- On green it writes the **tree hash of the working tree** (tracked + untracked, honouring `.gitignore`, computed with a temporary index: `GIT_INDEX_FILE=tmp git add -A && git write-tree`) to `$(git rev-parse --git-path <prefix>-ci-ok)`; if files changed during the run, no stamp.
-- A PreToolUse hook on `gh pr merge` compares the PR head commit's tree with the stamp; mismatch → block. Read the stamp from the session's `cwd` (worktrees have their own git dir).
+Installed by `scripts/review-gate/install.py` (`gate_stamp.py` and the merge guard hook). `<prefix>` is config `prefix` (default `quality`).
+- One gate script runs every check in parallel lanes, prints a stage timing table and a budget (e.g. 600 s).
+- At the start it takes `tree=$(python3 .claude/quality/gate_stamp.py --tree)`: the **tree hash of the working tree** (tracked + untracked, honouring `.gitignore`, computed with a temporary index, `GIT_INDEX_FILE=tmp git add -A && git write-tree`, so the real index is untouched). On green it runs `gate_stamp.py --write --tree "$tree"`, which writes `<tree> <time>` to `$(git rev-parse --git-path <prefix>-ci-ok)`; if files changed during the run the tree differs, no stamp is written and the old one is removed. On red it runs `gate_stamp.py --clear`. `gate_stamp.py --check [--head SHA]` tells whether the stamp matches HEAD (or SHA).
+- Run the kit's own tests in the gate as `python3 -B -m unittest discover -s .claude/quality/tests`: without `-B` CPython writes `__pycache__` next to the tests between `--tree` and `--write --tree "$tree"`, so the tree hash changes and no stamp is written. `install.py` also writes `.claude/quality/.gitignore` (`__pycache__/`), so stray bytecode under `.claude/quality/` stays out of the tree hash even without `-B`.
+- The merge guard hook `.claude/hooks/merge-guard.py` (PreToolUse on Bash) blocks `gh pr merge` unless the `<prefix>-ci-ok` tree equals the PR head commit's tree and a valid `<prefix>-review-ok-<PR>` exists (rules in `reviewer.md`). It reads the stamps from the repo of the session's `cwd` (worktrees and submodules have their own git dir).
 - Pitfalls: macOS ships bash 3.2 — `[[ $x -eq 0 ]]` as the last command of a function does not trigger `set -e`; use `if …; then return 1; fi`. Two gate runs at once share databases and ports: forbid it. Load from parallel lanes can time out unit tests: raise per-test timeouts rather than serializing.
 
-## 1. Gate canary (designed)
+## 1. Gate canary (proven pattern)
 
 At the start of the gate run, a dry pass where each lane gets one step that must fail (`CI_CANARY=1`): the script must exit non-zero. If it exits 0, the gate itself is broken → red. Seconds of cost; prevents a repeat of "green but false".
 
-## 2. Spec tests and `spec_guard` (designed)
+## 2. Spec tests and `spec_guard` (proven, installable)
 
 - A separate agent that sees only the spec (requirement sections, AC, domain scenarios from 18) writes acceptance tests before implementation, into a dedicated place (e.g. `tests/Spec/`, `e2e/spec/`), committed with subject prefix `spec:`.
-- `tools/spec_guard.py` in the gate: any commit in the PR range whose subject does not start with `spec:` and touches the spec dirs → red. A wrong spec test is fixed in its own `spec:` commit with a reviewer note.
+- `python3 .claude/quality/spec_guard.py` (review-gate kit) in the gate: any commit in the PR range whose subject does not start with the spec prefix and touches the spec dirs → red. Config keys: `spec_paths` (path prefixes of the spec dirs; empty list = no check), `spec_prefix` (default `spec:`), `spec_extra` (further paths a `spec:` commit may touch, e.g. a generated acceptance matrix). A wrong spec test is fixed in its own `spec:` commit with a reviewer note.
 - The coder makes them pass; it never edits them.
 
 ## 3. Mutation testing (manual form proven)
@@ -33,9 +34,11 @@ Run only on files changed in the PR (diff against `origin/main`), domain/applica
 | Rust | cargo-mutants |
 | Java/Kotlin | PIT |
 
-Until a tool is wired, the manual form: for each new rule, revert/break it and show a test goes red (sos-scrum did this every session).
+Until a tool is wired, the manual form: for each new rule, revert/break it and show a test goes red (the first project did this every session).
 
 ## 4. Reviewer + review stamp — see `reviewer.md`.
+
+Proven, installable: `review_stamp.py`, `merge_guard.py`, `review_rounds.py` and the reviewer agent template in `scripts/review-gate/`.
 
 ## 5. Independent oracle and property tests (designed)
 
@@ -44,11 +47,13 @@ Until a tool is wired, the manual form: for each new rule, revert/break it and s
 
 ## 6. Traceability (designed)
 
-PR template line `Source: <spec §>, <arch §>, AC-NN`. The reviewer returns code that no source asks for (hardening without users, speculative options). A tracking matrix (AC → tests) in the gate keeps acceptance criteria honest (sos-scrum `tools/ac_matrix.py --check`).
+PR template line `Source: <spec §>, <arch §>, AC-NN`. The accepted labels are config `source_labels` (default `Source`; a project may add a label in its own language); `review_stamp.py` refuses to write the review stamp when the PR body has no such line or the line is empty after the colon. The reviewer returns code that no source asks for (hardening without users, speculative options). A tracking matrix (AC → tests) in the gate keeps acceptance criteria honest.
 
 ## 7. Weekly audit (designed)
 
 Fresh-context session: tenant isolation, authorization matrix vs catalogue, dependency advisories, architecture drift (module boundaries), tech debt, findings-journal rule candidates, critic canary (9), volume tests (13). Output: a fix list into the next sessions' messages.
+
+Run the audit through a lean read-only project agent, not a general-purpose one: `.claude/agents/opus-auditor.md` (template `references/auditor.md`) with the strongest model, `tools: Read, Grep, Glob, Bash`, a `maxTurns` budget and a "report by turn ~N" note. Why: a general-purpose agent starts with every tool loaded (measured: ~64k tokens per audit) and one wrote a file despite a read-only brief. The allowlist removes Write and Edit at the harness level; Bash writes stay instruction-only, so the body lists the exact read-only commands and check scripts it may run (`--check` modes, caches off, read-only DB transactions) and leaves gate runs, perf runs, canary planting and journal rows to the lead. Report per finding: category, severity, `path:line` evidence, proposed fix; unconfirmed suspicions under "Open questions". Template: `references/auditor.md`.
 
 ## 8. Module READMEs (designed)
 
@@ -56,7 +61,7 @@ Per module: purpose (2 lines), entry points (routes, commands, listeners), invar
 
 ## 9. Critic canary — see `reviewer.md`.
 
-## 10. Findings→rule loop — see `reviewer.md`. Visual class: geometry checks in the accessibility/screenshot suite (e.g. `cornerBleeds`: no painted descendant outside a rounded container's corner; `horizontalOverflow`: no page scroll at 320 px).
+## 10. Findings→rule loop — see `reviewer.md`. `quality_log.py --check` (review-gate kit; run it in the gate) enforces the journal rules. Visual class: geometry checks in the accessibility/screenshot suite (e.g. `cornerBleeds`: no painted descendant outside a rounded container's corner; `horizontalOverflow`: no page scroll at 320 px).
 
 ## 11. Git guard (proven, installable)
 

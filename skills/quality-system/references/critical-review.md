@@ -19,9 +19,9 @@ find tests -name '*.php' -exec cat {} + | wc -l
 # frontend: real features vs mock-only, generated code
 for d in src/app/features/*; do echo "$(find $d -name '*.ts' ! -name '*.spec.ts' -exec cat {} + | wc -l) $d"; done | sort -rn
 find src -type d -name mock | xargs -I{} sh -c 'echo "$(find {} -name "*.ts" -exec cat {} + | wc -l) {}"'
-# docs weight, handoff size, open questions, ADR rate
-find docs -name '*.md' -exec cat {} + | wc -c; wc -c docs/holat.md
-sed -n '/^## Ochiq savollar/,/^## /p' docs/holat.md | grep -c '^- '
+# docs weight, handoff size, open questions, ADR rate (<handoff file>, e.g. docs/handoff.md; use the project's own heading, in its language, for the open-questions section)
+find docs -name '*.md' -exec cat {} + | wc -c; wc -c <handoff file>
+sed -n '/^## Open questions/,/^## /p' <handoff file> | grep -c '^- '
 ls docs/adr | wc -l
 # pace and history
 git log --merges --oneline | grep -c 'Merge pull request'
@@ -39,7 +39,7 @@ Also note: CI duration trend, whether hosted CI runs at all, real-backend E2E co
 
 ## 3. Compare plan and execution
 
-- **Critical path**: has it started? (In sos-scrum the workflow engine package was empty and five domain modules were 15-line stubs after 37 sessions, while infrastructure was polished.)
+- **Critical path**: has it started? (In the first project the workflow engine package was empty and five domain modules were 15-line stubs after 37 sessions, while infrastructure was polished.)
 - **Vertical vs horizontal**: the plan said "vertical slices"; was it built as deep horizontal layers with an empty domain?
 - **Guessed contracts**: how much UI is built on APIs that do not exist yet? That is reconciliation debt.
 - **YAGNI**: hardening mechanisms with zero users (delivery tokens, replay tools, archive policies…). Do not delete built and tested ones; stop adding new ones without a requirement or a real incident.
