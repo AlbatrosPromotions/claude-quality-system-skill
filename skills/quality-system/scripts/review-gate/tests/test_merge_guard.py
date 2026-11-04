@@ -1035,13 +1035,80 @@ class ReviewerOnlyStampTests(HookTestCase):
                 "git diff main -- .claude/quality/review_stamp.py --head", "FOO=1 grep -- --report review_stamp.py", "sudo grep -- --head review_stamp.py",
                 "time grep -c -- --report .claude/quality/review_stamp.py", "true && grep -- --report .claude/quality/review_stamp.py | head -n 3",
                 "bash -c 'grep -n -- --report .claude/quality/review_stamp.py'", "eval 'cat review_stamp.py --head'", "echo $(grep -c -- --head review_stamp.py)",
-                "x=`grep -c -- --report review_stamp.py`", "python3 -m pytest .claude/quality/review_stamp.py --head", "python3 other.py review_stamp.py --head",
-                "python3 -c 'print(1)' review_stamp.py --head"]
+                "x=`grep -c -- --report review_stamp.py`", "python3 -c 'print(1)' review_stamp.py --head"]  # -c KOD: qolgan so'zlar kodga ma'lumot, ishga tushmaydi
         for agent in (None, "general-purpose", "opus-reviewer"):
             for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent=agent)):
                 with self.subTest(cmd=cmd, agent=agent):
                     self.assertAllowed(r)
                     self.assertEqual(calls, [])
+
+    def test_launcher_forms_are_recognised(self):
+        """Ishga tushirgich orqali (uv run, poetry run, caffeinate, xcrun, arch, docker exec, xargs, find -exec, python -m trace, har qanday python nomi): skript nomi va yozish bayrog'i
+        bir buyruqda, dastur esa ma'lum "bajarmaydigan" emas = yopiq yo'l. Reviewer agentiga hammasi ochiq. Python boshqa skript yoki modulni yuritsa (python3 other.py ...,
+        python3 -m pytest ...) u ham ishga tushirgich bo'lishi mumkin (trace, cProfile, o'ram skript): bloklanadi."""
+        head = "a" * 40
+        w = f"--pr 7 --head {head} --report r.md"
+        cmds = [f"uv run python .claude/quality/review_stamp.py {w}", f"poetry run python .claude/quality/review_stamp.py {w}",
+                f"caffeinate -i python3 .claude/quality/review_stamp.py {w}", f"xcrun python3 .claude/quality/review_stamp.py {w}",
+                f"python3 -m trace --trace .claude/quality/review_stamp.py {w}", f"python3 -m cProfile -s time review_stamp.py {w}", f"python3 -m pdb review_stamp.py {w}",
+                f"pythonw3 .claude/quality/review_stamp.py {w}", f"python3.13t .claude/quality/review_stamp.py {w}", f"python3.13t -B -W ignore review_stamp.py {w}",
+                f"pypy3 review_stamp.py {w}", f"uv run --with x python -m review_stamp {w}", f"uv run python -mreview_stamp {w}", f"uv run python review_stamp.py --pr 7 --hea {head}",
+                "uv run python review_stamp.py --pr 7 --rep r.md", f"arch -arm64 python3 review_stamp.py {w}", f"docker exec box python3 review_stamp.py {w}",
+                f"xargs python3 review_stamp.py {w}", f"find . -exec python3 review_stamp.py {w} \\;", f"python3 other.py review_stamp.py {w}",
+                f"python3 -m pytest .claude/quality/review_stamp.py {w}", f"bash .claude/quality/review_stamp.py {w}", f"FOO=1 uv run python review_stamp.py {w}",
+                f"sudo -u x caffeinate python3 review_stamp.py {w}", f"cd docs/handbook && uv run python ../../.claude/quality/review_stamp.py {w}",
+                f"true | caffeinate python3 review_stamp.py {w}", f"sed -i s/a/b/ review_stamp.py {w}", f"/usr/local/bin/uv run python /abs/review_stamp.py {w}",
+                f"bash -c 'uv run python .claude/quality/review_stamp.py {w}'", f"echo $(caffeinate -i python3 review_stamp.py {w})"]  # ichma-ich shakllar ham
+        denied, allowed = self.run_many(cmds), self.run_many(cmds, agent="opus-reviewer")
+        for cmd, (r, calls), (ok, _) in zip(cmds, denied, allowed):
+            with self.subTest(cmd=cmd):
+                self.assertBlocked(r, "ko'rik izini faqat opus-reviewer agenti yozadi")
+                self.assertEqual(calls, [])
+                self.assertAllowed(ok)
+
+    def test_launcher_read_only_forms_stay_allowed(self):
+        cmds = ["uv run python .claude/quality/review_stamp.py --pr 7 --check", "poetry run python .claude/quality/review_stamp.py --pr 7 --allow --round 3",
+                "caffeinate -i python3 .claude/quality/review_stamp.py --pr 7 --check", "xcrun python3 review_stamp.py --help",
+                "python3 -m trace --trace .claude/quality/review_stamp.py --pr 7 --check", "pythonw3 .claude/quality/review_stamp.py --pr 7 --check",
+                "python3.13t review_stamp.py --pr 7 --allow", "uv run python -m review_stamp --pr 7 --check", "uv run python -m unittest discover -s .claude/quality/tests -p 'test_review_stamp.py'",
+                "uv run python -m py_compile .claude/quality/review_stamp.py", "python3 -m pytest tests/test_review_stamp.py", "uv run python other.py --head x --report y",
+                "uv run pytest -q", "ruff check .claude/quality/review_stamp.py", "chmod +x .claude/quality/review_stamp.py", "xargs -n1 echo review_stamp.py"]
+        for agent in (None, "general-purpose", "opus-reviewer"):
+            for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertAllowed(r)
+                    self.assertEqual(calls, [])
+
+    def test_a_bare_name_is_the_script_only_after_dash_m(self):
+        """`gh pr create --head review_stamp` dagi `--head` gh ning bayrog'i, `review_stamp` esa branch nomi: yalang nom (`.py` siz) faqat `python -m` dan keyin skript."""
+        cmds = ["gh pr create --head review_stamp --base main --title t", "gh pr list --head feat/review_stamp --state open", "gh pr view 5 --repo owner/review_stamp",
+                "gh pr create --head x --title review_stamp", "gh pr create --head review_stamp.fix --base main", "make review_stamp --report"]
+        for agent in (None, "general-purpose"):
+            for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertAllowed(r)
+                    self.assertEqual(calls, [])
+
+    def test_known_inert_programs_pass_but_sed_in_place_does_not(self):
+        """Ma'lum "bajarmaydigan" dasturlar (grep oilasi, sahifalagichlar, awk, wc, printf, stat, file, test, [, git, sed -i siz) iz skriptini faqat argument sifatida oladi.
+        sed -i skriptning o'zini yozadi: ro'yxatda emas."""
+        inert = ["rg -n -- --report .claude/quality/review_stamp.py", "egrep -- --head review_stamp.py", "fgrep -- --report review_stamp.py", "ag --head review_stamp.py",
+                 "ack -- --report review_stamp.py", "less .claude/quality/review_stamp.py --head", "more review_stamp.py --report", "tail -n 5 review_stamp.py --head",
+                 "awk '{print}' .claude/quality/review_stamp.py --head", "wc -l review_stamp.py --report", "printf '%s' review_stamp.py --head", "stat review_stamp.py --head",
+                 "file review_stamp.py --report", "test -f review_stamp.py --head", "[ -f review_stamp.py --head ]", "/usr/bin/grep -c -- --head review_stamp.py",
+                 "sed -e p review_stamp.py --head", "sed -n -E 's/a/b/p' review_stamp.py --report", "sed -nf s.sed review_stamp.py --head", "git log -p -- review_stamp.py --head",
+                 "sudo -u x rg -- --head review_stamp.py", "FOO=1 awk 1 review_stamp.py --report"]
+        in_place = ["sed -i s/a/b/ review_stamp.py --head", "sed -i.bak s/a/b/ review_stamp.py --head", "sed -ni p review_stamp.py --report", "sed --in-place s/a/b/ review_stamp.py --head",
+                    "sed -Ei s/a/b/ review_stamp.py --head", "sed -n -i p review_stamp.py --report", "sed --i p review_stamp.py --head"]
+        for agent in (None, "general-purpose", "opus-reviewer"):
+            for cmd, (r, calls) in zip(inert, self.run_many(inert, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertAllowed(r)
+                    self.assertEqual(calls, [])
+        for cmd, (r, _), (ok, _) in zip(in_place, self.run_many(in_place), self.run_many(in_place, agent="opus-reviewer")):
+            with self.subTest(cmd=cmd):
+                self.assertBlocked(r, "ko'rik izini faqat opus-reviewer agenti yozadi")
+                self.assertAllowed(ok)
 
     def test_interpreter_options_before_the_script_are_skipped(self):
         head = "a" * 40
@@ -1132,13 +1199,70 @@ class GateStampWriteTests(HookTestCase):
     def test_mentions_as_arguments_of_other_programs_pass(self):
         cmds = ["cat .claude/quality/gate_stamp.py", "grep -n -- --write .claude/quality/gate_stamp.py", "grep --write gate_stamp.py", "sed -n 1,5p gate_stamp.py --write",
                 "echo gate_stamp.py --write", "git commit -m 'docs: gate_stamp.py --write only inside the gate'", "git add .claude/quality/gate_stamp.py",
-                "ls gate_stamp.py --write", "python3 my_gate_stamp.py --write", "python3 gate_stamp2.py --write", "python3 other.py gate_stamp.py --write",
+                "ls gate_stamp.py --write", "python3 my_gate_stamp.py --write", "python3 gate_stamp2.py --write",
                 "python3 -m unittest tests/test_gate_stamp.py", "python3 -m py_compile .claude/quality/gate_stamp.py", "python3 other.py --write",
                 "bash -c 'grep -n -- --write .claude/quality/gate_stamp.py'", "echo $(grep -c -- --write gate_stamp.py)", "head -n 3 gate_stamp.py --write",
-                "python3 -c 'print(1)' gate_stamp.py --write"]
+                "python3 -c 'print(1)' gate_stamp.py --write"]  # -c KOD: qolgan so'zlar kodga ma'lumot, ishga tushmaydi
         for cmd, (r, calls) in zip(cmds, self.run_many(cmds)):
             with self.subTest(cmd=cmd):
                 self.assertAllowed(r)
+                self.assertEqual(calls, [])
+
+    def test_launcher_forms_are_recognised(self):
+        """Ishga tushirgich orqali ham (uv run, poetry run, caffeinate, xcrun, arch, docker exec, xargs, find -exec, python -m trace, har qanday python nomi): skript nomi va --write
+        bir buyruqda, dastur ma'lum "bajarmaydigan" emas. Reviewer ga ham ochiq emas. python3 other.py gate_stamp.py --write ham: boshqa skript ishga tushirgich bo'lishi mumkin."""
+        cmds = ["uv run python .claude/quality/gate_stamp.py --write", "poetry run python .claude/quality/gate_stamp.py --write", "caffeinate -i python3 .claude/quality/gate_stamp.py --write",
+                "xcrun python3 .claude/quality/gate_stamp.py --write --tree abc", "python3 -m trace --trace .claude/quality/gate_stamp.py --write",
+                "python3 -m cProfile -s time gate_stamp.py --write", "python3 -m pdb gate_stamp.py --write", "pythonw3 .claude/quality/gate_stamp.py --write",
+                "python3.13t .claude/quality/gate_stamp.py --write", "python3.13t -B gate_stamp.py --wr", "pypy3 gate_stamp.py --write", "uv run --with x python -m gate_stamp --write",
+                "arch -arm64 python3 gate_stamp.py --write", "docker exec box python3 gate_stamp.py --write", "xargs python3 gate_stamp.py --write",
+                "find . -exec python3 gate_stamp.py --write \\;", "python3 other.py gate_stamp.py --write", "python3 -m pytest .claude/quality/gate_stamp.py --write",
+                "bash gate_stamp.py --write", "FOO=1 uv run python gate_stamp.py --write", "sudo -u x caffeinate python3 gate_stamp.py --write",
+                "cd docs/handbook && uv run python ../../.claude/quality/gate_stamp.py --write", "true | caffeinate python3 gate_stamp.py --write",
+                "sed -i s/a/b/ gate_stamp.py --write", "/usr/local/bin/uv run python /abs/gate_stamp.py --write", "uv run python gate_stamp.py --tree abc --write",
+                "bash -c 'uv run python .claude/quality/gate_stamp.py --write'", "tree=$(caffeinate -i python3 gate_stamp.py --write)"]  # ichma-ich shakllar ham
+        for agent in (None, "opus-reviewer"):
+            for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertBlocked(r, self.MSG)
+                    self.assertEqual(calls, [])
+
+    def test_launcher_read_only_forms_stay_allowed(self):
+        cmds = ["uv run python .claude/quality/gate_stamp.py --tree", "poetry run python .claude/quality/gate_stamp.py --check --head HEAD",
+                "caffeinate -i python3 .claude/quality/gate_stamp.py --clear", "xcrun python3 gate_stamp.py --help", "python3 -m trace --trace .claude/quality/gate_stamp.py --tree",
+                "pythonw3 .claude/quality/gate_stamp.py --tree", "python3.13t gate_stamp.py --check", "uv run python -m gate_stamp --tree",
+                "uv run python -m unittest discover -s .claude/quality/tests -p 'test_gate_stamp.py'", "uv run python -m py_compile .claude/quality/gate_stamp.py",
+                "python3 -m pytest tests/test_gate_stamp.py", "uv run python other.py --write", "uv run pytest -q", "ruff check .claude/quality/gate_stamp.py",
+                "chmod +x .claude/quality/gate_stamp.py", "tree=$(uv run python .claude/quality/gate_stamp.py --tree)"]
+        for agent in (None, "opus-reviewer"):
+            for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertAllowed(r)
+                    self.assertEqual(calls, [])
+
+    def test_known_inert_programs_pass_but_sed_in_place_does_not(self):
+        inert = ["rg -n -- --write .claude/quality/gate_stamp.py", "egrep -- --write gate_stamp.py", "fgrep -- --write gate_stamp.py", "ag --write gate_stamp.py",
+                 "ack -- --write gate_stamp.py", "less .claude/quality/gate_stamp.py --write", "more gate_stamp.py --write", "tail -n 5 gate_stamp.py --write",
+                 "awk '{print}' .claude/quality/gate_stamp.py --write", "wc -l gate_stamp.py --write", "printf '%s' gate_stamp.py --write", "stat gate_stamp.py --write",
+                 "file gate_stamp.py --write", "test -f gate_stamp.py --write", "[ -f gate_stamp.py --write ]", "/usr/bin/grep -c -- --write gate_stamp.py",
+                 "sed -e p gate_stamp.py --write", "sed -n -E 's/a/b/p' gate_stamp.py --wr", "git log -p -- gate_stamp.py --write", "sudo -u x rg -- --write gate_stamp.py"]
+        in_place = ["sed -i s/a/b/ gate_stamp.py --write", "sed -i.bak s/a/b/ gate_stamp.py --write", "sed -ni p gate_stamp.py --write", "sed --in-place s/a/b/ gate_stamp.py --write"]
+        for agent in (None, "opus-reviewer"):
+            for cmd, (r, calls) in zip(inert, self.run_many(inert, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertAllowed(r)
+                    self.assertEqual(calls, [])
+            for cmd, (r, _) in zip(in_place, self.run_many(in_place, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertBlocked(r, self.MSG)
+
+    def test_python_interpreter_with_any_suffix_counts_as_executing(self):
+        """python, python3, python3.13t (erkin oqim), python3.13d, pythonw3, python3.12-config, pypy3: nomining oxiri ijro etishdan chiqarmaydi."""
+        names = ["python", "python3", "python3.13t", "python3.13d", "pythonw3", "pythonw", "python3.12-config", "pypy", "pypy3", "/opt/homebrew/bin/python3.14t", "./venv/bin/python3.9"]
+        cmds = [f"{name} -B .claude/quality/gate_stamp.py --write" for name in names] + [f"{name} -m gate_stamp --write" for name in names]
+        for cmd, (r, calls) in zip(cmds, self.run_many(cmds)):
+            with self.subTest(cmd=cmd):
+                self.assertBlocked(r, self.MSG)
                 self.assertEqual(calls, [])
 
     def test_gate_command_comes_from_config(self):
@@ -1181,6 +1305,129 @@ class GateStampWriteTests(HookTestCase):
 
     def stamp_path_ci(self):
         return stamp_path(self.repo, self.ci_name)
+
+
+class StdinShellStampTests(HookTestCase):
+    """Shell skriptni stdin dan o'qisa (quvur, <<<, heredoc) buyruq matni bo'laklanmaydi: `gh pr merge` matni kabi, xom matn bo'yicha iz skriptlarining yozish qoidalari ham
+    qo'llanadi (ko'rik izi: reviewer ga ochiq; darvoza izi: hech kimga). --tree, --check kabi o'qish shakllari va shell bo'lmagan dastur (cat) o'tadi."""
+
+    GATE = "python3 .claude/quality/gate_stamp.py --write --tree x"
+    REVIEW = "python3 .claude/quality/review_stamp.py --pr 5 --head " + "a" * 40 + " --report r.md"
+
+    @staticmethod
+    def through_a_shell(line):
+        """`line` shell ga stdin orqali beriladigan shakllar."""
+        return [f"bash <<'EOF'\n{line}\nEOF", f"sh <<EOF\n{line}\nEOF", f"zsh <<-EOF\n{line}\nEOF", f"echo '{line}' | sh", f"printf '%s\\n' '{line}' | bash",
+                f"bash -s <<< '{line}'", f"cat <<'EOF' | bash\n{line}\nEOF", f"echo '{line}' | bash -s -- arg", f"true && bash <<'EOF'\n{line}\nEOF", f"dash <<'EOF'\n{line}\nEOF"]
+
+    def test_gate_write_through_a_shell_is_blocked_for_everyone(self):
+        cmds = self.through_a_shell(self.GATE)
+        for agent in (None, "opus-reviewer"):
+            for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertBlocked(r, "darvoza izini faqat darvoza skripti yozadi (make ci ichida)")
+                    self.assertEqual(calls, [])
+
+    def test_review_stamp_write_through_a_shell_is_for_the_reviewer_only(self):
+        cmds = self.through_a_shell(self.REVIEW)
+        for agent in (None, "general-purpose"):
+            for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertBlocked(r, "ko'rik izini faqat opus-reviewer agenti yozadi")
+                    self.assertEqual(calls, [])
+        for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent="opus-reviewer")):
+            with self.subTest(cmd=cmd, agent="opus-reviewer"):
+                self.assertAllowed(r)
+                self.assertEqual(calls, [])
+
+    def test_read_only_forms_through_a_shell_pass(self):
+        lines = ["python3 .claude/quality/gate_stamp.py --tree", "python3 .claude/quality/gate_stamp.py --check", "python3 .claude/quality/gate_stamp.py --clear",
+                 "python3 .claude/quality/gate_stamp.py --write-nothing", "python3 .claude/quality/review_stamp.py --pr 5 --check",
+                 "python3 .claude/quality/review_stamp.py --pr 5 --allow --round 3", "python3 .claude/quality/gate_stamp.py --tree x"]
+        cmds = [cmd for line in lines for cmd in self.through_a_shell(line)]
+        for agent in (None, "opus-reviewer"):
+            for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertAllowed(r)
+                    self.assertEqual(calls, [])
+
+    def test_text_that_does_not_reach_a_shell_passes(self):
+        """cat (shell emas), skript fayli (stdin ma'lumot), bash -c (matn -c da), bash -n (bajarmaydi), python -c: matn shell ga stdin orqali bormaydi."""
+        cmds = []
+        for line in (self.GATE, self.REVIEW):
+            cmds += [f"cat <<'EOF'\n{line}\nEOF", f"cat > notes.md <<'EOF'\n{line}\nEOF", f"echo '{line}' | cat", f"echo '{line}' | grep -c write", f"bash notes.sh <<'EOF'\n{line}\nEOF",
+                     f"bash -c 'echo hi' <<< '{line}'", f"bash -n <<'EOF'\n{line}\nEOF", f"python3 -c 'import sys; print(sys.stdin.read())' <<< '{line}'",
+                     f"echo '{line}' > notes.txt"]
+        for agent in (None, "opus-reviewer"):
+            for cmd, (r, calls) in zip(cmds, self.run_many(cmds, agent=agent)):
+                with self.subTest(cmd=cmd, agent=agent):
+                    self.assertAllowed(r)
+                    self.assertEqual(calls, [])
+
+    def test_the_merge_text_rule_keeps_working_next_to_it(self):
+        self.assertBlocked(self.hook("echo 'gh pr merge 7 --merge' | sh"), "qobiq qatori ichida")
+        self.assertBlocked(self.hook("bash <<'EOF'\ngh pr merge 7 --merge\nEOF"), "qobiq qatori ichida")
+        self.assertAllowed(self.hook("cat <<'EOF'\ngh pr merge 7 --merge\nEOF"))
+
+
+class HiddenMergeWordTests(HookTestCase):
+    """`gh` bo'sh argumentni o'tkazib yuboradi, shuning uchun `gh pr '' merge` merge'ning o'zi: oddiy merge sifatida tekshiriladi. `pr`/`merge` turishi kerak joydagi `$X` yoki `...`
+    ish vaqtida bo'sh (yoki bayroq) bo'lib qolishi mumkin: buyruq merge ekani aniqlanmaydi, shuning uchun bloklanadi (cd nishoni noma'lum bo'lgandagi kabi)."""
+
+    EMPTY = ["gh pr '' merge --merge", "gh '' pr merge --merge", 'gh pr "" merge --merge', "gh '' pr '' merge --merge", "gh pr '' '' merge --merge", "gh pr '' merge 7 --merge",
+             "gh '' pr merge 7", "FOO=1 gh pr '' merge --merge", "cd . && gh '' pr merge --merge"]
+    UNRESOLVED = ["gh pr $X merge --merge", "gh $X pr merge --merge", "X=; gh $X pr merge --merge", 'gh pr "$X" merge 7', "gh pr ${X} merge 7", "gh pr $X $Y merge 7",
+                  "gh pr `echo` merge 7", "gh pr $(echo) merge 7", "gh pr $X", "gh $X", "gh pr $X7 merge", "gh pr --repo=o/r $X merge 7", "export X=; gh $X pr merge --merge",
+                  "gh pr '' $X merge", "FOO=1 gh $X pr merge --merge", "bash -c 'gh pr $X merge --merge'", "true && gh pr \"$X\" merge 7"]
+
+    def test_empty_words_do_not_hide_the_merge(self):
+        for cmd, (r, calls) in zip(self.EMPTY, self.run_many(self.EMPTY)):
+            with self.subTest(cmd=cmd, stamps="yo'q"):
+                self.assertBlocked(r, "make ci yashil natijasi yo'q")
+                self.assertEqual(len(calls), 1, calls)
+                self.assertIn("pr view", calls[0])
+        self.ci_stamp()
+        self.review_stamp()
+        for cmd, (r, calls) in zip(self.EMPTY, self.run_many(self.EMPTY)):
+            with self.subTest(cmd=cmd, stamps="yaroqli"):
+                self.assertAllowed(r)
+                self.assertEqual(len(calls), 1, calls)
+
+    def test_empty_words_do_not_weaken_the_other_merge_rules(self):
+        self.ci_stamp()
+        self.review_stamp()
+        self.assertBlocked(self.hook("gh pr '' merge -R o/r 7 --merge"), "-R/--repo")
+        self.assertBlocked(self.hook("gh -R o/r '' pr merge 7"), "-R/--repo")
+        self.assertBlocked(self.hook("gh pr '' merge '' 7"), "oddiy PR raqami emas")
+        self.assertBlocked(self.hook("gh pr '' merge https://github.com/o/r/pull/7"), "oddiy PR raqami emas")
+        self.assertBlocked(self.hook("bash -c \"gh pr '' merge 7\""), "qobiq qatori ichida")
+        self.assertBlocked(self.hook("GH_REPO=o/r gh pr '' merge 7"), "GH_REPO")
+
+    def test_variable_or_backtick_word_where_pr_or_merge_belongs_is_blocked(self):
+        self.ci_stamp()
+        self.review_stamp()  # yaroqli izlar bo'lsa ham: bu merge ekani noma'lum shakl
+        for cmd, (r, calls) in zip(self.UNRESOLVED, self.run_many(self.UNRESOLVED)):
+            with self.subTest(cmd=cmd):
+                self.assertBlocked(r, "o'zgaruvchi so'z")
+                self.assertEqual(calls, [])
+
+    def test_dollar_words_in_other_gh_commands_pass(self):
+        """`$X` faqat `pr`/`merge` o'rnida to'siq; boshqa gh buyruqlarida (view, comment, `--add-label merge`, -R qiymati, api yo'li) oddiy so'z."""
+        cmds = ["gh pr view $N --json number", "gh pr comment $N --body merge", 'gh pr edit "$N" --add-label merge', "gh pr checks $N --watch",
+                "gh pr list --search \"$Q\" --state merged", "gh pr create --title \"$T\" --body merge", "gh issue list --search \"$Q\"", "gh -R $REPO issue list",
+                "gh api repos/$R/pulls/$N", "gh run view $ID --log", "gh pr diff $(gh pr list -q '.[0].number' --json number)", "gh pr status", "gh --version",
+                "gh pr view `echo 7` --json number"]
+        for cmd, (r, calls) in zip(cmds, self.run_many(cmds)):
+            with self.subTest(cmd=cmd):
+                self.assertAllowed(r)
+                self.assertEqual(calls, [])  # merge emas: hook gh ni chaqirmaydi
+
+    def test_existing_dollar_target_and_repo_rules_are_unchanged(self):
+        self.ci_stamp()
+        self.review_stamp()
+        self.assertBlocked(self.hook("gh pr merge $N --merge"), "oddiy PR raqami emas")
+        self.assertBlocked(self.hook('gh -R "$REPO" pr merge 7'), "-R/--repo")
+        self.assertAllowed(self.hook("gh pr merge 7 --merge"))
 
 
 class ConfigTests(HookTestCase):

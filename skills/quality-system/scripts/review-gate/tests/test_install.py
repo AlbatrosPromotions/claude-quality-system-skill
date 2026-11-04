@@ -365,19 +365,45 @@ class InstallTests(unittest.TestCase):
         self.ok("--skip-tests", "--force")
         self.assertEqual(agent.read_text(), original)
 
-    def test_differing_quality_gitignore_needs_force_and_the_diff_is_shown(self):
+    def test_user_edited_quality_gitignore_is_merged_and_never_a_conflict(self):
+        """Foydalanuvchi o'z qatorlarini yozgan .gitignore ziddiyat emas: `__pycache__/` yo'q bo'lsa oxiriga bir marta qo'shiladi, qatorlar saqlanadi, --force ham o'chirmaydi."""
         self.ok("--skip-tests")
         ignore = self.proj / ".claude/quality/.gitignore"
-        ignore.write_text("__pycache__/\n*.local\n")
-        before = snapshot(self.proj)
-        r = self.install("--skip-tests")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn(".claude/quality/.gitignore", r.stderr)
-        self.assertIn("*.local", r.stderr)
-        self.assertIn("--force", r.stderr)
-        self.assertEqual(snapshot(self.proj), before)
+        ignore.write_text("*.local\n")
+        r = self.ok("--dry-run")
+        self.assertIn(".claude/quality/.gitignore: qo'shiladi", r.stdout)
+        self.assertEqual(ignore.read_text(), "*.local\n")  # dry-run yozmaydi
+        r = self.ok("--skip-tests")  # --force siz ham o'tadi: ziddiyat yo'q
+        self.assertIn(".claude/quality/.gitignore: qo'shiladi", r.stdout)
+        self.assertEqual(ignore.read_text(), "*.local\n__pycache__/\n")
+        r = self.ok("--skip-tests")  # qayta o'rnatish: qator bir marta
+        self.assertIn(".claude/quality/.gitignore: o'zgarmagan", r.stdout)
+        self.assertEqual(ignore.read_text(), "*.local\n__pycache__/\n")
         self.ok("--skip-tests", "--force")
-        self.assertEqual(ignore.read_text(), "__pycache__/\n")
+        self.assertEqual(ignore.read_text(), "*.local\n__pycache__/\n")
+
+    def test_quality_gitignore_gets_the_line_after_a_missing_newline_and_lookalikes(self):
+        self.ok("--skip-tests")
+        ignore = self.proj / ".claude/quality/.gitignore"
+        for text, expected in (("*.local", "*.local\n__pycache__/\n"), ("", "__pycache__/\n"), ("# __pycache__/\n", "# __pycache__/\n__pycache__/\n"),
+                               ("/__pycache__/\n", "/__pycache__/\n__pycache__/\n"), ("__pycache__/x\n", "__pycache__/x\n__pycache__/\n"),
+                               ("*.local\r\n", "*.local\r\n__pycache__/\n")):
+            with self.subTest(text=text):
+                ignore.write_bytes(text.encode())
+                self.ok("--skip-tests")
+                self.assertEqual(ignore.read_bytes(), expected.encode())
+
+    def test_quality_gitignore_that_already_ignores_pycache_is_left_untouched(self):
+        self.ok("--skip-tests")
+        ignore = self.proj / ".claude/quality/.gitignore"
+        for text in ("# mening\n*.local\n__pycache__/\n!keep.local\n", "__pycache__/", "  __pycache__/  \r\n*.log\r\n", "__pycache__\n", "**/__pycache__/\n", "\n\n__pycache__/\nfoo"):
+            with self.subTest(text=text):
+                ignore.write_bytes(text.encode())
+                os.utime(ignore, (1_000_000_000, 1_000_000_000))
+                r = self.ok("--skip-tests", "--force")
+                self.assertIn(".claude/quality/.gitignore: o'zgarmagan", r.stdout)
+                self.assertEqual(ignore.read_bytes(), text.encode())
+                self.assertEqual(int(os.stat(ignore).st_mtime), 1_000_000_000)
 
     def test_identical_quality_gitignore_is_not_rewritten(self):
         self.ok("--skip-tests")

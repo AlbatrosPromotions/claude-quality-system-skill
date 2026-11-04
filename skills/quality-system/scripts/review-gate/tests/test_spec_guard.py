@@ -547,6 +547,29 @@ class SpecConfigTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn("protected", out)
 
+    def test_invalid_protected_is_silent_when_config_ref_or_argument_decides(self):
+        """Standart ref faqat kerak bo'lganda hisoblanadi: config `ref` yoki --ref bor bo'lsa yaroqsiz `protected` haqida ogohlantirish chiqmaydi, tekshiruv berilgan ref ga qarshi."""
+        git(self.repo, "update-ref", "refs/remotes/upstream/dev", "main")
+        commit(self.repo, "fix: x", {SPEC_API: "v2"})
+        for protected in ([], "trunk", [""], [5], ["trunk", ""], {"a": 1}):
+            with self.subTest(protected=protected):
+                code, out = run_guard(self.repo, config={**CONFIG, "ref": "upstream/dev", "protected": protected})
+                self.assertEqual(code, 1, out)
+                self.assertIn("upstream/dev bilan umumiy", out)
+                for text in ("protected", "standart", "origin/main", "ogohlantirish"):
+                    self.assertNotIn(text, out)
+                code, out = run_guard(self.repo, "--ref", "upstream/dev", config={**CONFIG, "protected": protected})
+                self.assertEqual(code, 1, out)
+                self.assertIn("upstream/dev bilan umumiy", out)
+                self.assertNotIn("protected", out)
+
+    def test_invalid_ref_in_config_still_reports_both_when_the_default_is_used(self):
+        code, out = run_guard(self.repo, config={**CONFIG, "ref": "", "protected": []})
+        self.assertEqual(code, 0, out)
+        self.assertIn("origin/main bilan umumiy", out)
+        self.assertIn("config protected", out)
+        self.assertIn("config ref", out)
+
 
 class LayoutTest(unittest.TestCase):
     """Skript nusxasi o'rnatilgan joylashuvda: sozlama skript yonida, repo = skript papkasining git ildizi."""

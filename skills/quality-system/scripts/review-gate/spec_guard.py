@@ -81,6 +81,14 @@ def default_ref(cfg):
     return DEFAULT_REF
 
 
+def configured_ref(cfg):
+    """config `ref` yaroqli bo'lsa o'zi, aks holda origin/<protected[0]>: standart (va `protected` haqidagi ogohlantirishi) faqat kerak bo'lganda hisoblanadi."""
+    value = cfg.get("ref")
+    if isinstance(value, str) and value.strip():
+        return value
+    return string_value(cfg, "ref", default_ref(cfg))
+
+
 def normal_entry(entry):
     """Yo'l yozuvi -> repo ildiziga nisbatan normallashgan yo'l; ildizning o'zi, mutlaq yo'l, `..` va bo'sh yozuv None (hamma narsani spec qilib qo'yardi)."""
     if not isinstance(entry, str) or not entry.strip() or entry.startswith("/"):
@@ -275,7 +283,7 @@ def main(argv=None):
         print("spec_guard: spec_paths sozlanmagan, tekshiruv yo'q")
         return 0
     repo = os.path.abspath(args.repo) if args.repo else default_repo()
-    ref = args.ref or string_value(cfg, "ref", default_ref(cfg))
+    ref = args.ref or configured_ref(cfg)
     gate = string_value(cfg, "gate_command", DEFAULT_GATE)
     try:
         code, text = run(repo, ref, spec, gate)

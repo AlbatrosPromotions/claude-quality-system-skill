@@ -14,13 +14,17 @@ Merge qoidasi:
   - `gh pr view [N] --json number,headRefOid`; `<prefix>-ci-ok` ning birinchi maydoni PR head daraxtiga teng bo'lishi shart;
   - `<prefix>-review-ok-<PR>` = `<daraxt> <PR> <head> <vaqt> round=<k> blockers=<b> major=<m> minor=<n>`: PR shu PR, bloker 0, 1-tur izida muhim 0;
     iz daraxti PR head daraxtidan farq qilsa iz head i PR head ning ajdodi bo'lishi shart (ko'rikdan keyingi mayda commit lar faqat darvoza bilan).
-  - `gh` bilan `pr` va `pr` bilan `merge` orasida bayroqlar bo'lishi mumkin (-R/--repo qiymati bilan, --help): `gh pr --repo o/r merge 5` ham merge, -R/--repo bloki unga ham tegadi.
-Ikkinchi qoida (merge dan mustaqil): iz yozadigan skript faqat DASTUR sifatida ishga tushirilganda tekshiriladi (buyruqning o'zi yoki python/python3/python3.x ning
-skript yoki -m argumenti, o'ramlardan, bash -c, eval va $(...) ichida ham); grep/cat/echo/git kabi boshqa dastur argumentidagi tilga olish oddiy matn:
+  - `gh` bilan `pr` va `pr` bilan `merge` orasida bayroqlar bo'lishi mumkin (-R/--repo qiymati bilan, --help): `gh pr --repo o/r merge 5` ham merge, -R/--repo bloki unga ham tegadi;
+    bo'sh so'zni gh o'tkazib yuboradi: `gh pr '' merge 5` ham oddiy merge. `pr` yoki `merge` turishi kerak joydagi `$X` / `...` ish vaqtida bo'sh yoki bayroq bo'lib qolishi mumkin
+    (`gh pr $X merge`, `X=; gh $X pr merge`): merge ekani noma'lum, shuning uchun blok (nishoni noma'lum cd kabi).
+Ikkinchi qoida (merge dan mustaqil): iz yozadigan skript faqat DASTUR sifatida ishga tushirilganda tekshiriladi (buyruqning o'zi yoki python*/pypy* ning skript yoki -m
+argumenti, o'ramlardan, bash -c, eval va $(...) ichida ham); yopiq yo'l: boshqa ishga tushirgich orqali (uv run python ..., poetry run, caffeinate -i, xcrun, python3 -m trace ...)
+buyruqning biror so'zi skript nomi bo'lib yozish bayrog'i ham shu buyruqda bo'lsa, dastur ma'lum "bajarmaydigan" ro'yxatda (NON_EXEC: grep, cat, echo, git ... ) bo'lmasa blok.
+Shell skriptni stdin dan o'qisa (quvur, <<<, heredoc) buyruq matni ko'rinmaydi: xom matn bo'yicha shu qoidalar ham (agent_type bilan):
   - `review_stamp.py` ni --head/--report bilan (izni yozadigan shakl) chaqirish faqat sozlamadagi reviewer agentidan (hook kirishidagi agent_type); --check va --allow hammaga ochiq;
   - `gate_stamp.py` ni --write bilan (qisqartmalari --wr... ham) chaqirish hech kimga ochiq emas: darvoza izini faqat darvoza skripti yozadi. Hook darvoza skriptining o'z
     chaqiruvini ko'rmaydi (asbob buyrug'i `make ci`), shuning uchun darvoza ishlayveradi; --tree, --check, --clear, --help ochiq.
-Bu to'siq, atayin aldab o'tish shakllari (xargs, find -exec, o'zgaruvchi orqali yo'l, skript ichidagi chaqiruv) uning doirasida emas.
+Bu to'siq, atayin aldab o'tish shakllari (nom va bayroq turli buyruqda bo'lgan xargs/find -exec, o'zgaruvchi orqali yo'l, skript ichidagi chaqiruv) uning doirasida emas.
 Sozlama (.claude/quality/config.json): prefix (quality), gate_command (make ci), reviewer (opus-reviewer). Tartib: --config > $QUALITY_CONFIG >
 <hook papkasi>/../quality/config.json; fayl yoki kalit yo'q = standart, buzuq fayl = standart + bitta stderr qator. Faqat standart kutubxona.
 """
@@ -52,9 +56,12 @@ STAMP_WORD = re.compile(r"(?<![A-Za-z0-9_])review_stamp(?![A-Za-z0-9_])")
 WRITE_FLAG_TEXT = re.compile(r"--(?:he|hea|head|re|rep|repo|repor|report)(?![A-Za-z0-9_-])")
 GATE_WORD = re.compile(r"(?<![A-Za-z0-9_])gate_stamp(?![A-Za-z0-9_])")
 GATE_FLAG_TEXT = re.compile(r"--(?:w|wr|wri|writ|write)(?![A-Za-z0-9_-])")
-PYTHON = re.compile(r"python(?:[0-9]+(?:\.[0-9]+)*)?")
+PYTHON = re.compile(r"(?:python|pypy)[0-9A-Za-z._+-]*")  # python, python3, python3.13t, pythonw3, pypy3: qo'shimcha dastur ijro etishdan chiqarmaydi
 STAMP_SCRIPT = re.compile(r"(review_stamp|gate_stamp)(?:\.py)?")
 WRITE_FLAGS = {"review_stamp": (("head", "report"), 2), "gate_stamp": (("write",), 1)}  # izni yozadigan bayroqlar, qisqartmaning eng kichik uzunligi
+# iz skripti nomini faqat ARGUMENT sifatida oladigan, uni ishga tushirmaydigan dasturlar (sed -i bundan tashqari: u fayllarni yozadi)
+NON_EXEC = {"grep", "rg", "egrep", "fgrep", "ag", "ack", "cat", "head", "tail", "less", "more", "sed", "awk", "diff", "ls", "wc", "echo", "printf",
+            "git", "stat", "file", "test", "["}
 GLUED_COMMENT = re.compile(r"#([A-Za-z0-9_.-]+)")
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 CD_FLAGS = re.compile(r"^-[LPe@]+$")
@@ -420,16 +427,20 @@ def takes_value(tok):
 
 
 def merge_index(args):
-    """`gh [bayroqlar] pr [bayroqlar] merge` da `merge` ning args (gh dan keyingi so'zlar) dagi indeksi, aks holda None.
-    Bayroqlar: -R/--repo qiymati bilan, --help kabi; `--` bayroqlarni tugatadi (cobra shunda `pr` ni o'zini bajaradi)."""
+    """(`gh [bayroqlar] pr [bayroqlar] merge` da `merge` ning args (gh dan keyingi so'zlar) dagi indeksi yoki None, yashirin so'z yoki None).
+    Bayroqlar: -R/--repo qiymati bilan, --help kabi; `--` bayroqlarni tugatadi (cobra shunda `pr` ni o'zini bajaradi). Bo'sh so'zni gh o'tkazib yuboradi
+    (`gh pr '' merge` = merge): u ham o'tkaziladi. `pr` yoki `merge` turishi kerak joyda `$X` / `...` so'zi bo'lsa ish vaqtida u bo'sh yoki bayroq bo'lib
+    qolishi mumkin: shu so'z ikkinchi qiymat sifatida qaytadi (merge ekani noma'lum)."""
     i = 0
     for word in ("pr", "merge"):
-        while i < len(args) and args[i].startswith("-") and args[i] not in ("-", "--"):
+        while i < len(args) and (args[i] == "" or args[i].startswith("-") and args[i] not in ("-", "--")):
             i += 2 if takes_value(args[i]) else 1
-        if i >= len(args) or args[i] != word:
-            return None
+        if i >= len(args):
+            return None, None
+        if args[i] != word:
+            return None, (args[i] if "$" in args[i] or "`" in args[i] else None)
         i += 1
-    return i - 1
+    return i - 1, None
 
 
 def python_target(args):
@@ -468,6 +479,55 @@ def script_call(cmd):
         word, rest = cmd[0], cmd[1:]
     m = STAMP_SCRIPT.fullmatch(os.path.basename(word)) if word else None
     return (m.group(1), rest) if m else (None, [])
+
+
+def inplace_sed(args):
+    """sed -i / --in-place (--i, klaster -ni, -i.bak): fayllarni yozadi. -e/-f/-l dan keyingi qism qiymat, bayroq emas."""
+    for a in args:
+        if a == "--":
+            break
+        if a.startswith("--"):
+            if a.startswith("--i"):
+                return True
+        elif a.startswith("-"):
+            for c in a[1:]:
+                if c == "i":
+                    return True
+                if c in "efl":
+                    break
+    return False
+
+
+def inert(cmd):
+    """cmd[0] iz skripti nomini faqat argument sifatida oladigan ma'lum dasturmi (matnni o'qiydi yoki chiqaradi, ishga tushirmaydi)."""
+    prog = os.path.basename(cmd[0])
+    return prog in NON_EXEC and not (prog == "sed" and inplace_sed(cmd[1:]))
+
+
+def stamp_word(cmd, k):
+    """cmd[k] iz skriptining yo'li yoki moduli bo'lsa uning nomi (review_stamp | gate_stamp), aks holda None. Yalang nom (`.py` siz) faqat `-m` dan keyin skript:
+    `gh pr create --head review_stamp` dagi branch nomi emas. Bo'shliqli so'z (`bash -c '... /review_stamp.py'` matni, PR tavsifi) yo'l deb olinmaydi."""
+    word = cmd[k]
+    if any(c.isspace() for c in word):
+        return None
+    glued = word.startswith("-m")  # python -mreview_stamp
+    base = os.path.basename(word[2:] if glued else word)
+    m = STAMP_SCRIPT.fullmatch(base)
+    return m.group(1) if m and (base.endswith(".py") or glued or (k > 0 and cmd[k - 1] == "-m")) else None
+
+
+def launched(cmd):
+    """[(iz skripti nomi, so'zlar)]: yopiq yo'l, script_call skriptni bevosita topmaganda. Buyruq so'zlaridan birining nomi iz skripti bo'lsa, skript ishga tushirgich
+    (uv run python ..., poetry run, caffeinate -i, xcrun, python3 -m trace ...) orqali bajarilishi mumkin: dastur ma'lum "bajarmaydigan" ro'yxatda bo'lmasa shunday deb
+    olinadi, yozish bayrog'i esa shu buyruqning istalgan so'zi. python -c KOD da qolgan so'zlar kodga ma'lumot, ishga tushmaydi."""
+    if inert(cmd) or (PYTHON.fullmatch(os.path.basename(cmd[0])) and python_target(cmd[1:])[0] is None):
+        return []
+    found = []
+    for k in range(len(cmd)):
+        script = stamp_word(cmd, k)
+        if script and script not in found:
+            found.append(script)
+    return [(script, cmd) for script in found]
 
 
 def is_write_flag(tok, script):
@@ -604,10 +664,7 @@ class Scan(object):
         except ValueError:  # tirnoq juftlanmagan: xom matn bo'yicha konservativ tekshiruv
             if MERGE_TEXT.search(ctx.raw):
                 block(QUOTE_MSG)
-            if STAMP_WORD.search(text) and WRITE_FLAG_TEXT.search(text):
-                self.stamp_denied()
-            if GATE_WORD.search(text) and GATE_FLAG_TEXT.search(text):
-                self.gate_denied()
+            self.stamp_text(text)
             return
         self.walk(tokens)
 
@@ -647,7 +704,10 @@ class Scan(object):
         if not cmd:
             return
         name, args = os.path.basename(cmd[0]), cmd[1:]
-        at = merge_index(args) if name == "gh" else None
+        at, hidden = merge_index(args) if name == "gh" else (None, None)
+        if hidden:
+            block(f"gh buyrug'ida `pr`/`merge` o'rnida o'zgaruvchi so'z ({one_line(hidden)}): ish vaqtida u bo'sh yoki bayroq bo'lib, buyruq gh pr merge bo'lib qolishi mumkin, "
+                  "shuning uchun uni tekshirib bo'lmaydi. Buyruqni o'zgaruvchisiz, oddiy ko'rinishda bering (masalan: gh pr merge 8 --merge).")
         if name in ("cd", "pushd"):
             self.cd(args)
         elif name == "popd":
@@ -662,16 +722,26 @@ class Scan(object):
             inline, reads_stdin = shell_args(args)
             if inline is not None:
                 self.fork().run(inline)
-            if reads_stdin and MERGE_TEXT.search(self.ctx.raw):  # echo '...' | sh, sh <<< '...': matn shell ga stdin orqali boradi
-                block(SHELL_MSG)
+            if reads_stdin:  # echo '...' | sh, sh <<< '...', sh <<EOF: matn shell ga stdin orqali boradi (heredoc tanasi ham xom matnda)
+                if MERGE_TEXT.search(self.ctx.raw):
+                    block(SHELL_MSG)
+                self.stamp_text(self.ctx.raw)
         elif name == "eval":
             self.fork().run(" ".join(args))
         script, rest = script_call(cmd)
-        if script and any(is_write_flag(w, script) for w in rest):
-            if script == "review_stamp":
-                self.stamp_denied()
-            else:
-                self.gate_denied()
+        for script, words in [(script, rest)] if script else launched(cmd):
+            if any(is_write_flag(w, script) for w in words):
+                if script == "review_stamp":
+                    self.stamp_denied()
+                else:
+                    self.gate_denied()
+
+    def stamp_text(self, text):
+        """Buyruqqa bo'lib bo'lmaydigan matn (tirnoq juftlanmagan, shell stdin dan o'qiydi): iz skripti nomi va yozish bayrog'i birga bo'lsa shu skriptning qoidasi."""
+        if STAMP_WORD.search(text) and WRITE_FLAG_TEXT.search(text):
+            self.stamp_denied()
+        if GATE_WORD.search(text) and GATE_FLAG_TEXT.search(text):
+            self.gate_denied()
 
     def stamp_denied(self):
         reviewer = self.ctx.cfg.reviewer

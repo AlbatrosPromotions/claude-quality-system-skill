@@ -10,7 +10,8 @@ quality_log,spec_guard}.py, .claude/hooks/{merge-guard,review-rounds}.py, .claud
 .claude/quality/.gitignore (`__pycache__/`: darvozada testlar yurganda CPython yozgan bayt-kod daraxt xeshini o'zgartirmasin),
 .claude/agents/<reviewer>.md (reviewer.md shabloni), .claude/quality/config.json (mavjud kalitlar saqlanadi: CLI > mavjud > standart) va
 .claude/settings.json (faqat qo'shadi: ikki PreToolUse yozuvi, boshqasiga tegmaydi). Keyin o'rnatilgan testlarni ishga tushiradi (~5 daqiqa).
-Fayl boshqacha bo'lsa --force siz ustiga yozmaydi; config.json dagi mavjud qiymatni CLI boshqacha qilsa ham --force kerak. Faqat standart kutubxona.
+Fayl boshqacha bo'lsa --force siz ustiga yozmaydi; config.json dagi mavjud qiymatni CLI boshqacha qilsa ham --force kerak. Faqat .claude/quality/.gitignore bundan
+mustasno: foydalanuvchi qatorlari saqlanadi, `__pycache__/` yo'q bo'lsa oxiriga qo'shiladi (ziddiyat ham, --force ham kerak emas). Faqat standart kutubxona.
 """
 import argparse
 import copy
@@ -36,6 +37,7 @@ FILES = [  # (kit dagi manba, loyihadagi yo'l, bajariladigan)
 TESTS_DST = ".claude/quality/tests"
 GITIGNORE = ".claude/quality/.gitignore"
 GITIGNORE_TEXT = "__pycache__/\n"
+GITIGNORE_HAS = {"__pycache__/", "__pycache__", "**/__pycache__/", "**/__pycache__"}  # tests/__pycache__ ni ham yopadigan yozuvlar (`/__pycache__/` yopmaydi)
 TEMPLATE = "reviewer.md"
 AGENTS = ".claude/agents"
 CONFIG = ".claude/quality/config.json"
@@ -211,6 +213,13 @@ def kit_tests():
     return names
 
 
+def merged_gitignore(old, line):
+    """Mavjud .gitignore: foydalanuvchi qatorlari saqlanadi, `__pycache__/` yo'q bo'lsa oxiriga qo'shiladi; bor bo'lsa baytlar o'zgarmaydi (qayta o'rnatish ham)."""
+    if any(ln.strip() in GITIGNORE_HAS for ln in old.decode("utf-8", "replace").splitlines()):
+        return old
+    return old + (b"" if not old or old.endswith(b"\n") else b"\n") + line
+
+
 def tail(text, n=15):
     return "\n".join(text.strip().splitlines()[-n:])
 
@@ -278,7 +287,10 @@ def install(args):
             plan.append((target, new, exe, "yangi"))
             continue
         old = target.read_bytes()
-        if old == new:
+        if dst == GITIGNORE:  # foydalanuvchi tahrir qilgan bo'lishi mumkin: ziddiyat emas, yetishmayotgan qator qo'shiladi
+            merged = merged_gitignore(old, new)
+            plan.append((target, None if merged == old else merged, exe, "o'zgarmagan" if merged == old else "qo'shiladi"))
+        elif old == new:
             plan.append((target, None, exe, "o'zgarmagan"))
         else:
             plan.append((target, new, exe, "ustiga yoziladi (--force)"))
