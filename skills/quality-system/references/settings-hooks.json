@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/quality-system/scripts/update_check.py\" --hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

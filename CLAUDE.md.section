@@ -1,0 +1,3 @@
+# Sifat tizimi
+- Loyihaning sifat darvozalarini (CI, mustaqil ko'rik, spek testlari, `main` himoyasi) qurishdan yoki tekshirishdan oldin, odam ko'rib chiqmaydigan AI kodiga ishonishdan oldin yoki foydalanuvchi tanqidiy ko'rik so'raganda `quality-system` skill'ini yukla.
+- `git-guard` va `review-gate` to'plamlari loyihaga alohida o'rnatiladi: skill papkasidagi `scripts/git-guard/install.py` va `scripts/review-gate/install.py` bilan (avval `--dry-run`).

@@ -216,7 +216,7 @@ Keyingi qadamlar:
   1. O'zgarishlarni feature branchda commit qiling va PR orqali main ga kiriting (main ga to'g'ridan-to'g'ri commit endi bloklanadi):
        git add .claude .githooks && git commit -m "git himoyasi"
   2. Loyiha darvozasiga (make ci / CI) qo'shing:
-       python3 -m unittest discover -s .claude/quality/tests
+       python3 -B -m unittest discover -s .claude/quality/tests   (-B: __pycache__ ish daraxtiga yozilmasin, darvoza izi buzilmasin)
        python3 .claude/quality/main_guard.py        (CI da hook siz muhit uchun: --no-hooks-check)
   3. Har yangi klonda hook larni yoqing (masalan make git-hooks nishoni): python3 .claude/quality/main_guard.py --setup --verbose
   4. CLAUDE.md ga qoida qo'shing, masalan: "{cfg['protected'][0]} ga faqat PR va gh pr merge --merge orqali; .claude/hooks/guard-git.py,

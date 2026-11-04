@@ -28,7 +28,7 @@ python3 scripts/git-guard/install.py <loyiha-ildizi> [--baseline SHA] [--ref ori
 Loyiha darvozasiga (make ci / CI) qo'shing:
 
 ```
-python3 -m unittest discover -s .claude/quality/tests
+python3 -B -m unittest discover -s .claude/quality/tests   # -B: __pycache__ yozilmaydi (darvoza izi daraxt xeshi uchun)
 python3 .claude/quality/main_guard.py            # hook siz muhitda (CI) --no-hooks-check
 ```
 
